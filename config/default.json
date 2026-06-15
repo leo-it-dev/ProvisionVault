@@ -1,0 +1,10 @@
+{
+    "generic": {
+        "APPLICATION_URL": "https://some-url:444",
+        "SERVE_DOMAIN": "some-host.domain.de",
+        "HTTPS_PORT": 444,
+        "SSL_CERTIFICATE_FILENAME": "bundle.crt",
+        "SSL_PRIVKEY_FILENAME": "privkey.pem",
+        "KRB_SIGN_TIMEOUT_MINUTES": 5
+    }
+}

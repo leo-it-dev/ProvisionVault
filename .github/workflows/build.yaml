@@ -1,0 +1,127 @@
+on:
+  push:
+    tags:
+      - release/*
+permissions:
+  contents: write
+jobs:
+  build-backend:
+    runs-on: build
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-name }}
+    container: node:24
+    steps:
+      - run: apt-get update && apt-get install -y git-lfs
+      - uses: actions/checkout@v4
+      - run: node --version
+      - run: npm --version
+      - run: npm install
+      - run: npm run build
+      - name: Copy static assets into build directory
+        run: mkdir build/config && cp config/default.json build/config
+      - name: Reinstall node_modules as production run
+        run: rm -r node_modules && npm install --production
+      - name: Copy node_modules into build directory
+        run: cp -r node_modules build
+      - name: Upload Backend Artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist
+          path: build
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          rm -rf "$GITHUB_WORKSPACE"/*
+
+  package:
+    runs-on: build
+    needs: [build-backend]
+    container: debian:latest
+    steps:
+      - run: apt-get update && apt-get install -y git-lfs
+      - uses: actions/checkout@v4
+
+      - name: Download Backend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-dist
+          path: artifacts
+
+      - name: Package Application
+        run: |
+          mkdir package
+          cp -r artifacts/* package/
+          cp Dockerfile package/
+          echo "Packaged application with backend."
+
+      - name: Upload Final Package
+        id: upload-package
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-package
+          path: package
+
+      - uses: vimtor/action-zip@v1.2
+        with:
+          files: package/
+          dest: package.zip
+
+      - name: upload binaries to release
+        uses: softprops/action-gh-release@v1
+        with:
+         files: package.zip
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          rm -rf "$GITHUB_WORKSPACE"/*
+
+  build-docker:
+    runs-on: build
+    needs: [package]
+    steps:
+      - name: Download final package
+        uses: actions/download-artifact@v4
+        with:
+          name: full-package
+          path: package
+      - name: Set env
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/release/}" >> $GITHUB_ENV
+      - name: Login to private docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY_URL }}
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASS }}
+      - name: Install Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: ls
+        run: ls -lsa package/
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: package
+          push: true
+          tags: ${{ secrets.DOCKER_REGISTRY_URL }}/provision_vault:${{ env.RELEASE_VERSION }}
+
+  deploy:
+    runs-on: deploy
+    needs: [build-docker]
+    steps:
+      - name: Set env
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/release/}" >> $GITHUB_ENV
+      - name: Cleanup
+        run: rm -rf package
+      - name: Login to private docker registry
+        run: echo "${{ secrets.DOCKER_REGISTRY_PASS }}" | docker login ${{ secrets.DOCKER_REGISTRY_URL }} -u ${{ secrets.DOCKER_REGISTRY_USER }} --password-stdin
+      - name: Pull image
+        run: docker image pull ${{ secrets.DOCKER_REGISTRY_URL }}/provision_vault:${{ env.RELEASE_VERSION }}
+      - name: Stop old container
+        run: docker stop provision_vault || true
+      - name: Delete old container (if not already gone)
+        run: docker rm provision_vault || true
+      - name: Run image
+        run: script -q -c "docker run -d -it --name provision_vault --restart always -p 444:444 -v ~/dynamic/ssl/:/app/package/ssl -v ~/dynamic/config:/app/package/config -v ~/dynamic/machine-data:/app/package/machine-data ${{ secrets.DOCKER_REGISTRY_URL }}/provision_vault:${{ env.RELEASE_VERSION }}"
